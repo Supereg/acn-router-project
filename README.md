@@ -27,7 +27,10 @@ Setup hugetlbfs huge pages for DPDK
 ```
 	mkdir /mnt/huge
 	mount -t hugetlbfs nodev /mnt/huge
+```
+
 Statically allocate 256 2MB huge pages
+```
 	echo 256 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
 ```
 
