@@ -14,10 +14,11 @@ Compile DPDK
 
 Load the `vfio-pci` driver :
 ```
-	modprobe vfio-pci
+	modprobe uio
+	modprobe uio_pci_generic
 ```
 
-Use the tool `dpdk-devbind.py` to bind the VirtIO NICs to the `vfio-pci` driver.
+Use the tool `dpdk-devbind.py` to bind the VirtIO NICs to the `uio_pci_generic` driver.
 (Find out how to do this, the tool is self-explanatory.)
 ```
 	usertools/dpdk-devbind.py --h
