@@ -52,7 +52,7 @@ DPDK Reference
 ==============
 
 For this project, we use DPDK 20.11 (LTS).
-The comprehensive DPDK documentation can ge found at:
+The comprehensive DPDK documentation can be found at:
 
 * [HTML guides](https://doc.dpdk.org/guides-20.11/)
 * [HTML API](https://doc.dpdk.org/api-20.11/)
