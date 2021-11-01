@@ -1,7 +1,6 @@
 # Please keep these options sorted alphabetically.
 
-option('disable_drivers', type: 'string', value: '',
-	description: 'Comma-separated list of drivers to explicitly disable.')
+option('disable_drivers', type: 'string', value: 'net/octeontx,net/octeontx2,compress/octeontx,regex/octeontx2,baseband/turbo_sw,baseband/null,baseband/fpga_lte_fec,baseband/fpga_5gnr_fec,baseband/acc100,crypto/bcmfs,crypto/caam_jr,crypto/dpaa_sec,crypto/dpaa2_sec,crypto/nitrox,crypto/octeontx,crypto/octeontx2,event/dlb,event/dlb2,event/opdl,event/skeleton,event/sw,event/dsw,common/octeontx,common/octeontx2,raw/dpaa2_cmdif,raw/dpaa2_qdma,raw/ioat,raw/ntb,raw/octeontx2_dma,raw/octeontx2_ep,raw/skeleton,net/ark,net/atlantic,net/avp,net/axgbe,net/bnxt,net/cxgbe,net/dpaa,net/dpaa2,net/ena,net/enetc,net/enic,net/fm10k,net/hinic,net/hns3,net/kni,net/liquidio,net/netvsc,net/nfp,net/null,net/pfe,net/qede,net/thunderx,net/txgbe,vdpa/ifc,crypto/null,crypto/scheduler', description: 'Comma-separated list of drivers to explicitly disable.')
 option('drivers_install_subdir', type: 'string', value: 'dpdk/pmds-<VERSION>',
 	description: 'Subdirectory of libdir where to install PMDs. Defaults to using a versioned subdirectory.')
 option('enable_docs', type: 'boolean', value: false,
