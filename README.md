@@ -66,8 +66,9 @@ Installing/Compiling gtest is no longer necessary, VM contains compiled library.
 Remark on ACN-VM
 ================
 
-add recv_from_device() utility function
+add `recv_from_device()` utility function
 
-Apparently our virtual switch works different from last year and sets rx = tx queues with automatic load balancing
-(even when not configured) so this is a simple work-around.
+The virtual switch behaves different from real hardware.
+It sets rx = tx queues with automatic load balancing (even when not configured).
+The `recv_from_device()`  function fixes this issue by receiving from all available queues.
 
