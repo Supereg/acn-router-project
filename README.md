@@ -1,6 +1,12 @@
 Setting up DPDK
 ===============
 
+Install dependencies
+```
+	apt-get update
+	apt-get install meson
+```
+
 Compile DPDK
 ```
 	cd dpdk
@@ -21,7 +27,8 @@ Load the `vfio-pci` driver :
 Use the tool `dpdk-devbind.py` to bind the VirtIO NICs to the `uio_pci_generic` driver.
 (Find out how to do this, the tool is self-explanatory.)
 ```
-	usertools/dpdk-devbind.py --h
+	cd [root_repo]
+	dpdk/usertools/dpdk-devbind.py --h
 ```
 
 Setup hugetlbfs huge pages for DPDK
@@ -41,6 +48,7 @@ Compiling your App
 This example project comes with a CMakeFile and a simple wrapper that initializes DPDK for you.
 Run the following steps to build the router app
 ```
+	cd [root_repo]
 	cmake .
 	make
 ```
