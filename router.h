@@ -19,10 +19,18 @@
 #include "dpdk_init.h"
 #include "routing_table.h"
 
+// global variables holding configuration!
+struct Port* port_options;
+struct Route* route_options;
+
 int router_thread(void* arg);
 void parse_route(char *route);
 int parse_args(int argc, char **argv);
 void start_thread(uint8_t port);
+
+void free_ports();
+
+void free_routes();
 
 #endif
 

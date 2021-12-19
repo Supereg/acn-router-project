@@ -82,12 +82,21 @@ int run_thread(void* arg) {
  * Initialize a thread handling the packet processing.
  */
 void start_thread() {
-	struct thread_config* config = (struct thread_config*) malloc(sizeof(struct thread_config));
-	config->src_interface = src_interface;
-	config->src_queue = 0;
-	config->dst_interface = dst_interface;
-	config->dst_queue = 0;
-	rte_eal_remote_launch(run_thread, config, 1);
+	struct thread_config* forward = (struct thread_config*) malloc(sizeof(struct thread_config));
+    struct thread_config* backward = (struct thread_config*) malloc(sizeof(struct thread_config));
+
+    forward->src_interface = src_interface;
+    forward->src_queue = 0;
+    forward->dst_interface = dst_interface;
+    forward->dst_queue = 0;
+
+    backward->src_interface = dst_interface;
+    backward->src_queue = 0;
+    backward->dst_interface = src_interface;
+    backward->dst_queue = 0;
+
+    rte_eal_remote_launch(run_thread, forward, 1);
+    rte_eal_remote_launch(run_thread, backward, 2);
 }
 
 /** 
@@ -150,7 +159,7 @@ int main(int argc, char* argv[]) {
 		configure_device(dst_interface, 1);
 		configure_device(src_interface, 1);
 	}
-	printf("Forwarding from interface %i to interface %i\n", src_interface, dst_interface);
+	printf("Forwarding from interface %i to interface back and forth%i\n", src_interface, dst_interface);
 
 	start_thread();
 	rte_eal_mp_wait_lcore();

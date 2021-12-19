@@ -49,7 +49,7 @@ static struct rte_mempool* create_mempool() {
  * - num_queues rx/tx queues
  */
 void configure_device(uint8_t port_id, uint16_t num_queues) {
-        check_dpdk_error(rte_eth_promiscuous_enable(port_id), "enable promisc mode");
+    check_dpdk_error(rte_eth_promiscuous_enable(port_id), "enable promisc mode");
 	struct rte_eth_conf port_conf = { 0 };
 	check_dpdk_error(rte_eth_dev_configure(port_id, num_queues, num_queues, &port_conf), "configure device");
 	struct rte_eth_dev_info dev_info;

@@ -4,6 +4,11 @@
  * Main function of the router.
  */
 int main(int argc, char* argv[]) {
-    return 0;
+    int ret = parse_args(argc, argv);
+
+    free_ports();
+    free_routes();
+
+    return ret;
 }
 
