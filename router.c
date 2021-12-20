@@ -159,27 +159,46 @@ int handle_arp(
     }
 
     if (rte_be_to_cpu_16(arp_hdr->arp_hardware) != RTE_ARP_HRD_ETHER) {
-        printf("ARP unknown hardware\n");
+        printf("ARP unknown hardware: %d\n", rte_be_to_cpu_16(arp_hdr->arp_hardware));
         return -1;
     }
 
     if (rte_be_to_cpu_16(arp_hdr->arp_protocol) != RTE_ETHER_TYPE_IPV4) {
-        printf("ARP unknown protocol\n");
+        printf("ARP unknown protocol: %d\n", rte_be_to_cpu_16(arp_hdr->arp_protocol));
         return -1;
     }
 
     arp_ipv4 = &arp_hdr->arp_data;
 
-    // TODO hlen
-    // TODO plen
+    if (arp_hdr->arp_hlen != 0x06) {
+        printf("ARP unexpected hardware length: %d!", arp_hdr->arp_hlen);
+        return -1;
+    }
+
+    if (arp_hdr->arp_plen != 0x04) {
+        printf("ARP unexpected protocol length: %d!", arp_hdr->arp_plen);
+        return -1;
+    }
 
     switch (rte_be_to_cpu_16(arp_hdr->arp_opcode)) {
     case RTE_ARP_OP_REQUEST:
+        // arp reply is MAC unicast to the original sender
+        eth_hdr->d_addr = eth_hdr->s_addr;
+        // set eth src address to our eth address for the port
+        rte_eth_macaddr_get(config->port_id, &eth_hdr->s_addr);
+
+        // set the arp REPLY opcode
+        arp_hdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
+
+        // target addresses are the addresses of the original sender
         arp_ipv4->arp_tha = arp_ipv4->arp_sha;
         arp_ipv4->arp_tip = arp_ipv4->arp_sip;
 
+        // set our L2 and L3 address in the sender address fields.
         rte_eth_macaddr_get(config->port_id, &arp_ipv4->arp_sha);
         arp_ipv4->arp_sip = rte_cpu_to_be_16(config->ip_address); // TODO what about byte order?
+
+        while (!rte_eth_tx_burst(config->port_id, config->port_id, &buf, 1));
         break;
     default:
         // we only respond to requests
@@ -339,7 +358,7 @@ void parse_route(char *route) {
 }
 
 /**
- * Usage of applicaiton
+ * Usage of application
  */
 void usage() {
     printf("-p <port> -r <route>\n");
@@ -364,31 +383,31 @@ uint8_t port_count() {
     return count;
 }
 
-void free_ports_0(struct port* port) {
-    if (port->next != NULL) {
-        free_ports_0(port->next);
-    }
-    free(port);
-}
-
 // called from main.c
 void free_ports() {
-    if (port_options != NULL) {
-        free_ports_0(port_options);
-    }
-}
+    struct port* port;
+    struct port* tmp;
 
-void free_routes_0(struct route* route) {
-    if (route->next != NULL) {
-        free_routes_0(route->next);
+    port = port_options;
+    while (port != NULL) {
+        tmp = port;
+        port = port->next;
+
+        free(tmp);
     }
-    free(route);
 }
 
 // called from main.c
 void free_routes() {
-    if (route_options != NULL) {
-        free_routes_0(route_options);
+    struct route* route;
+    struct route* tmp;
+
+    route = route_options;
+    while (route != NULL) {
+        tmp = route;
+        route = route->next;
+
+        free(tmp);
     }
 }
 
@@ -597,8 +616,9 @@ void start_thread(struct port* port) {
 }
 
 
-void boot() {
+void run_loop() {
     struct port* port;
+    struct route* route;
     uint8_t count = port_count();
 
     // configuring devices ...
@@ -609,10 +629,22 @@ void boot() {
         port = port->next;
     }
 
+    // configuring the routing table
+    route = route_options;
+    while (route != NULL) {
+        add_route(route->route_ip_addr, route->prefix, &route->next_hop.mac_address, route->next_hop.port);
+        route = route->next;
+    }
+
     // starting threads for each device ...
     port = port_options;
     while (port != NULL) {
         start_thread(port);
         port = port->next;
     }
+
+
+
+    // awaiting on worker threds
+    rte_eal_mp_wait_lcore();
 }

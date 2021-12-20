@@ -7,9 +7,7 @@ int main(int argc, char* argv[]) {
     int ret = parse_args(argc, argv);
 
     if (ret == 0) {
-        boot();
-
-        rte_eal_mp_wait_lcore();
+        run_loop();
     }
 
     free_ports();

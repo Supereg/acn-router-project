@@ -58,7 +58,7 @@ void free_routes();
 
 void parse_route(char *route);
 
-void boot();
+void run_loop();
 
 int router_thread(void* arg);
 int parse_args(int argc, char **argv);

@@ -100,7 +100,7 @@ void start_thread() {
 }
 
 /** 
- * Usage of applicaiton
+ * Usage of application
  */
 void usage() {
 	printf("-s source interface [0-2] -d destination interface [0-2]\n");

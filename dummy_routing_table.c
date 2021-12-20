@@ -8,11 +8,11 @@ void build_routing_table() {
 }
 
 static struct routing_table_entry hop_info1 = {
-    .dst_mac = {.addr_bytes = {0x5a, 0xd4, 0xea, 0x8a, 0xd2, 0x60}},
+    .dst_mac = {.addr_bytes = {0x52, 0x54, 0x00, 0xff, 0x01, 0x00}},
     .dst_port = 0
 };
 static struct routing_table_entry hop_info2 = {
-    .dst_mac = {.addr_bytes = {0xd2, 0x09, 0xea, 0x8a, 0xd2, 0x60}},
+    .dst_mac = {.addr_bytes = {0x52, 0x54, 0x00, 0xff, 0x02, 0x00}},
     .dst_port = 1
 };
 
@@ -27,6 +27,6 @@ struct routing_table_entry* get_next_hop(uint32_t ip) {
 }
 
 void add_route(uint32_t ip_addr, uint8_t prefix, struct rte_ether_addr* mac_addr, uint8_t port) {
-	return; // do nothing
+	// do nothing
 }
 
