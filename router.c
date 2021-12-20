@@ -19,8 +19,10 @@
 
 struct device_config {
     uint8_t port_id;
-    uint32_t ip_address;
     uint8_t device_count;
+
+    struct rte_ether_addr eth_address;
+    uint32_t ip_address;
 };
 
 // global variables holding configuration!
@@ -28,8 +30,6 @@ struct port* port_options = NULL;
 struct route* route_options = NULL;
 
 int validate_ipv4(struct rte_mbuf* buf, struct rte_ether_hdr* eth_hdr, struct rte_ipv4_hdr* ipv4_hdr) {
-    uint16_t expected_cksum;
-    uint16_t cksum;
     uint8_t version;
     uint16_t total_length;
 
@@ -60,20 +60,16 @@ int validate_ipv4(struct rte_mbuf* buf, struct rte_ether_hdr* eth_hdr, struct rt
 
     // now it's safe to access ipv4_hdr!
 
-    // check for requirement (2)
-    expected_cksum = rte_be_to_cpu_16(ipv4_hdr->hdr_checksum);
-    ipv4_hdr->hdr_checksum = 0; // "The checksum field must be set to 0 by the caller."
-    cksum = rte_ipv4_cksum(ipv4_hdr);
-    if (cksum != expected_cksum) {
-        printf("IPv4 checksum didn't match: %d vs expected %d\n", cksum, expected_cksum);
+    // check for requirement (2) see https://datatracker.ietf.org/doc/html/rfc791#section-3.1
+    if (rte_ipv4_cksum(ipv4_hdr) != 0) {
+        printf("IPv4 checksum check failed!\n");
         return -1;
     }
-    ipv4_hdr->hdr_checksum = rte_cpu_to_be_16(expected_cksum); // TODO is this restoring needed?
 
     // check for requirement (3)
-    version = (uint8_t) (ipv4_hdr->version_ihl & ~RTE_IPV4_HDR_IHL_MASK);
+    version = (uint8_t) (ipv4_hdr->version_ihl & ~RTE_IPV4_HDR_IHL_MASK) >> 4;
     if (version != 0x04) {
-        printf("IPv4 version didn't match: %d vs expected 0x04\n", version);
+        printf("IPv4 version didn't match: %d vs expected %d\n", version, 0x04);
         return -1;
     }
 
@@ -110,7 +106,6 @@ int handle_ipv4(
     struct rte_ether_hdr* eth_hdr,
     struct rte_ipv4_hdr* ipv4_hdr
 ) {
-    uint32_t dst_addr;
     struct routing_table_entry* routing_entry;
 
     if (ipv4_hdr->time_to_live == 1) { // will be decreased to 0
@@ -118,21 +113,28 @@ int handle_ipv4(
         return -1;
     }
 
-    dst_addr = rte_be_to_cpu_32(ipv4_hdr->dst_addr);
-
-    routing_entry = get_next_hop(dst_addr);
+    // note get_next_hop expects network byte order
+    routing_entry = get_next_hop(ipv4_hdr->dst_addr);
     if (routing_entry == NULL) {
-        printf("IPv4 couldn't find a routing entry for dst: %u\n", dst_addr);
+        printf("IPv4 couldn't find a routing entry for dst: %d.%d.%d.%d\n",
+               RTE_IPV4_UNFORMAT(rte_be_to_cpu_32(ipv4_hdr->dst_addr)));
         return -1;
     }
 
     // copy our eth address into the s_addr field!
-    rte_eth_macaddr_get(config->port_id, &eth_hdr->s_addr);
+    eth_hdr->s_addr = config->eth_address;
     // set the d_addr field to the dst_mac of the routing entry!
     eth_hdr->d_addr = routing_entry->dst_mac;
 
     // RFC 1812 5.3.1 Time to Live (TTL)
-    ipv4_hdr->time_to_live -= 1; // TODO ttl shouldn't matter for the cksum right?
+    ipv4_hdr->time_to_live -= 1;
+    // recompute checksum
+    ipv4_hdr->hdr_checksum = 0;
+    ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
+    if (rte_ipv4_cksum(ipv4_hdr) != 0) {
+        printf("IPv4 Header checksum isn't correct after updating it: %d\n", rte_ipv4_cksum(ipv4_hdr));
+        return -1;
+    }
 
     // "You can assume that all links have the same MTU, handling fragmentation is not required."
     // => if packet got to us, we know it was smaller than the MTU, according to above statement
@@ -182,10 +184,15 @@ int handle_arp(
 
     switch (rte_be_to_cpu_16(arp_hdr->arp_opcode)) {
     case RTE_ARP_OP_REQUEST:
+        if (!(rte_is_zero_ether_addr(&arp_ipv4->arp_tha) && rte_be_to_cpu_32(arp_ipv4->arp_tip) == config->ip_address)) {
+            // the arp request doesn't ask for OUR IPv4 address.
+            return -2;
+        }
+
         // arp reply is MAC unicast to the original sender
         eth_hdr->d_addr = eth_hdr->s_addr;
         // set eth src address to our eth address for the port
-        rte_eth_macaddr_get(config->port_id, &eth_hdr->s_addr);
+        eth_hdr->s_addr = config->eth_address;
 
         // set the arp REPLY opcode
         arp_hdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
@@ -195,14 +202,14 @@ int handle_arp(
         arp_ipv4->arp_tip = arp_ipv4->arp_sip;
 
         // set our L2 and L3 address in the sender address fields.
-        rte_eth_macaddr_get(config->port_id, &arp_ipv4->arp_sha);
-        arp_ipv4->arp_sip = rte_cpu_to_be_16(config->ip_address); // TODO what about byte order?
+        arp_ipv4->arp_sha = config->eth_address;
+        arp_ipv4->arp_sip = rte_cpu_to_be_32(config->ip_address);
 
         while (!rte_eth_tx_burst(config->port_id, config->port_id, &buf, 1));
         break;
     default:
         // we only respond to requests
-        return -1;
+        return -2;
     }
 
     return 0;
@@ -218,13 +225,19 @@ void handle_packet(struct device_config* config, struct rte_mbuf* buf) {
     //  do we need to handle that? and how the hell is that to be handled?
     //  refer to rte_pktmbuf_pkt_len (also see last check in the IPv4 hdr validation)
 
-    printf("Received mbuf data_length: %d\n", rte_pktmbuf_data_len(buf));
     if (rte_pktmbuf_data_len(buf) < sizeof(struct rte_ether_hdr)) {
-        printf("ETH: Received way to less data!\n");
+        printf("ETH: Received way to less data (%d, %d)!\n", rte_pktmbuf_data_len(buf), rte_pktmbuf_pkt_len(buf));
         rte_pktmbuf_free(buf);
         return;
     }
     eth_hdr = rte_pktmbuf_mtod(buf, struct rte_ether_hdr*);
+
+    // TODO is this check even needed?
+    if (!(rte_is_broadcast_ether_addr(&eth_hdr->d_addr) || rte_is_same_ether_addr(&eth_hdr->d_addr, &config->eth_address))) {
+        // eth frame is neither a broadcast, nor addressed to us.
+        rte_pktmbuf_free(buf);
+        return;
+    }
 
     switch (rte_be_to_cpu_16(eth_hdr->ether_type)) {
     case RTE_ETHER_TYPE_IPV4:
@@ -245,8 +258,8 @@ void handle_packet(struct device_config* config, struct rte_mbuf* buf) {
         }
         break;
     case RTE_ETHER_TYPE_ARP:
-        // accessing the arp_hdr isn't save before the length check!
-        arp_hdr = rte_pktmbuf_mtod_offset(buf, struct rte_arp_hdr*, sizeof(struct rte_arp_hdr));
+        // accessing the arp_hdr isn't safe before the length check!
+        arp_hdr = rte_pktmbuf_mtod_offset(buf, struct rte_arp_hdr*, sizeof(struct rte_ether_hdr));
 
         ret = handle_arp(config, buf, eth_hdr, arp_hdr);
         if (ret != 0) {
@@ -276,7 +289,8 @@ int router_thread(void* arg) {
 
 int parse_ip_addr(char* ip_address, uint32_t* dst) {
     char buf[MAX_IP_LENGTH] = {0};
-    char dot_delimiter[] = ".";
+    const char dot_delimiter[] = ".";
+    char* context = NULL;
     char* ptr;
     uint8_t fst;
     uint8_t snd;
@@ -286,31 +300,31 @@ int parse_ip_addr(char* ip_address, uint32_t* dst) {
     assert(strlen(ip_address) < MAX_IP_LENGTH);
     memcpy(buf, ip_address, MAX_IP_LENGTH - 1);
 
-    ptr = strtok(buf, dot_delimiter);
+    ptr = strtok_r(buf, dot_delimiter, &context);
     if (ptr == NULL) {
         return -1;
     }
     fst = atoi(ptr);
 
-    ptr = strtok(NULL, dot_delimiter);
+    ptr = strtok_r(NULL, dot_delimiter, &context);
     if (ptr == NULL) {
         return -2;
     }
     snd = atoi(ptr);
 
-    ptr = strtok(NULL, dot_delimiter);
+    ptr = strtok_r(NULL, dot_delimiter, &context);
     if (ptr == NULL) {
         return -3;
     }
     trd = atoi(ptr);
 
-    ptr = strtok(NULL, dot_delimiter);
+    ptr = strtok_r(NULL, dot_delimiter, &context);
     if (ptr == NULL) {
         return -4;
     }
     fou = atoi(ptr);
 
-    ptr = strtok(NULL, dot_delimiter);
+    ptr = strtok_r(NULL, dot_delimiter, &context);
     if (ptr != NULL) {
         return -5;
     }
@@ -321,7 +335,8 @@ int parse_ip_addr(char* ip_address, uint32_t* dst) {
 
 int parse_ip_cidr(char* ip_address_cidr, uint32_t* dst, uint8_t* prefix) {
     char buf[MAX_IP_CIDR_LENGTH] = {0};
-    char slash_delimiter[] = "/";
+    const char slash_delimiter[] = "/";
+    char* context = NULL;
     char* ip_address;
     char* prefix_num;
     char* ptr;
@@ -330,17 +345,17 @@ int parse_ip_cidr(char* ip_address_cidr, uint32_t* dst, uint8_t* prefix) {
     assert(strlen(ip_address_cidr) < MAX_IP_CIDR_LENGTH);
     memcpy(buf, ip_address_cidr, MAX_IP_CIDR_LENGTH - 1);
 
-    ip_address = strtok(buf, slash_delimiter);
+    ip_address = strtok_r(buf, slash_delimiter, &context);
     if (ip_address == NULL) {
         return -6;
     }
 
-    prefix_num = strtok(NULL, slash_delimiter);
+    prefix_num = strtok_r(NULL, slash_delimiter, &context);
     if (prefix_num == NULL) {
         return -7;
     }
 
-    ptr = strtok(NULL, slash_delimiter);
+    ptr = strtok_r(NULL, slash_delimiter, &context);
     if (ptr != NULL) {
         return -8;
     }
@@ -413,7 +428,7 @@ void free_routes() {
 
 int parse_args(int argc, char** argv) {
     const char comma_delimiter[] = ",";
-
+    char* context = NULL;
     int opt;
     int ret;
     size_t len;
@@ -423,12 +438,14 @@ int parse_args(int argc, char** argv) {
     struct route* route = NULL;
 
     while ((opt = getopt(argc, argv, "p:r:")) != EOF) {
+        context = NULL;
+
         switch (opt) {
         case 'p':
             port = calloc(1, sizeof(struct port));
 
             // parse the interface id
-            ptr = strtok(optarg, comma_delimiter);
+            ptr = strtok_r(optarg, comma_delimiter, &context);
             if (ptr == NULL) {
                 printf("ERR: Invalid format for 'p' option(0)!\n");
                 usage();
@@ -439,7 +456,7 @@ int parse_args(int argc, char** argv) {
 
 
             // parse the ip address
-            ptr = strtok(NULL, comma_delimiter);
+            ptr = strtok_r(NULL, comma_delimiter, &context);
             if (ptr == NULL) {
                 printf("ERR: Invalid format for 'p' option(1)!\n");
                 usage();
@@ -464,7 +481,7 @@ int parse_args(int argc, char** argv) {
                 return 1;
             }
 
-            ptr = strtok(NULL, comma_delimiter);
+            ptr = strtok_r(NULL, comma_delimiter, &context);
             if (ptr != NULL) {
                 printf("ERR: Invalid format for 'p' option(4)!\n");
                 usage();
@@ -488,7 +505,7 @@ int parse_args(int argc, char** argv) {
         case 'r':
             route = calloc(1, sizeof(struct route));
 
-            ptr = strtok(optarg, comma_delimiter);
+            ptr = strtok_r(optarg, comma_delimiter, &context);
             if (ptr == NULL) {
                 printf("ERR: Invalid format for 'r' option(0)!\n");
                 usage();
@@ -512,7 +529,7 @@ int parse_args(int argc, char** argv) {
                 return 1;
             }
 
-            ptr = strtok(NULL, comma_delimiter);
+            ptr = strtok_r(NULL, comma_delimiter, &context);
             if (ptr == NULL) {
                 printf("ERR: Invalid format for 'r' option(3)!\n");
                 usage();
@@ -536,7 +553,7 @@ int parse_args(int argc, char** argv) {
                 return 1;
             }
 
-            ptr = strtok(NULL, comma_delimiter);
+            ptr = strtok_r(NULL, comma_delimiter, &context);
             if (ptr == NULL) {
                 printf("ERR: Invalid format for 'r' option(6)!\n");
                 usage();
@@ -545,7 +562,7 @@ int parse_args(int argc, char** argv) {
             }
             route->next_hop.port = atoi(ptr);
 
-            ptr = strtok(NULL, comma_delimiter);
+            ptr = strtok_r(NULL, comma_delimiter, &context);
             if (ptr != NULL) {
                 printf("ERR: Invalid format for 'r' option(7)!\n");
                 usage();
@@ -594,7 +611,7 @@ int parse_args(int argc, char** argv) {
             rte_ether_format_addr(formatted_mac, RTE_ETHER_ADDR_FMT_SIZE, &entry->next_hop.mac_address);
 
             printf(" - route: %d.%d.%d.%d/%d\t next_hop { mac: %s\tiface: %d }\n",
-                   RTE_IPV4_UNFORMAT(route->route_ip_addr), route->prefix, formatted_mac, entry->next_hop.port);
+                   RTE_IPV4_UNFORMAT(entry->route_ip_addr), entry->prefix, formatted_mac, entry->next_hop.port);
 
             entry = entry->next;
         } while (entry != NULL);
@@ -610,6 +627,8 @@ void start_thread(struct port* port) {
     config->port_id = port->iface_port;
     config->ip_address = port->ip_address;
     config->device_count = port_count();
+
+    rte_eth_macaddr_get(config->port_id, &config->eth_address);
 
     // worker_id start at 1(?), therefore we address them just by incrementing the iface_port by one.
     rte_eal_remote_launch(router_thread, config, port->iface_port + 1);
@@ -643,8 +662,6 @@ void run_loop() {
         port = port->next;
     }
 
-
-
-    // awaiting on worker threds
+    // awaiting on worker threads
     rte_eal_mp_wait_lcore();
 }

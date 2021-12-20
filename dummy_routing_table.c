@@ -16,7 +16,7 @@ static struct routing_table_entry hop_info2 = {
     .dst_port = 1
 };
 
-struct routing_table_entry* get_next_hop(uint32_t ip) {
+struct routing_table_entry* get_next_hop(rte_be32_t ip) {
 	if (ip == rte_cpu_to_be_32(RTE_IPV4(10,0,0,2))) {
 		return &hop_info1;
 	} else if (ip == rte_cpu_to_be_32(RTE_IPV4(192,168,0,2))) {
