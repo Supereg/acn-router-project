@@ -51,17 +51,16 @@ struct route {
     struct route* next;
 };
 
-// global variables holding configuration!
-struct port* port_options = NULL;
-struct route* route_options = NULL;
-
 uint8_t port_count();
 
 void free_ports();
 void free_routes();
 
-int router_thread(void* arg);
 void parse_route(char *route);
+
+void boot();
+
+int router_thread(void* arg);
 int parse_args(int argc, char **argv);
 void start_thread(struct port* port);
 

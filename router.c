@@ -23,6 +23,10 @@ struct device_config {
     uint8_t device_count;
 };
 
+// global variables holding configuration!
+struct port* port_options = NULL;
+struct route* route_options = NULL;
+
 int validate_ipv4(struct rte_mbuf* buf, struct rte_ether_hdr* eth_hdr, struct rte_ipv4_hdr* ipv4_hdr) {
     uint16_t expected_cksum;
     uint16_t cksum;
@@ -592,3 +596,23 @@ void start_thread(struct port* port) {
     rte_eal_remote_launch(router_thread, config, port->iface_port + 1);
 }
 
+
+void boot() {
+    struct port* port;
+    uint8_t count = port_count();
+
+    // configuring devices ...
+    port = port_options;
+    while (port != NULL) {
+        // "... we need as many transmit (tx) queues per device as we have devices ..."
+        configure_device(port->iface_port, count);
+        port = port->next;
+    }
+
+    // starting threads for each device ...
+    port = port_options;
+    while (port != NULL) {
+        start_thread(port);
+        port = port->next;
+    }
+}
