@@ -81,8 +81,10 @@ int validate_ipv4(struct rte_mbuf* buf, struct rte_ether_hdr* eth_hdr, struct rt
 
     // check for requirement (5)
     total_length = rte_be_to_cpu_16(ipv4_hdr->total_length);
-    // TODO we don't look any layer further, so we can't really verify,
-    //   if the total_length field is properly set to accommodate the header of the next layer(?)
+    if (total_length < rte_ipv4_hdr_len(ipv4_hdr)) {
+        printf("IPv4 total length smaller than required value: %d\n", total_length);
+        return -1;
+    }
 
     // Additionally, the router SHOULD verify that the packet length
     //   reported by the Link Layer is at least as large as the IP total
