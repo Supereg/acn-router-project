@@ -140,7 +140,7 @@ int handle_ipv4(
     // => if packet got to us, we know it was smaller than the MTU, according to above statement
     //  the packet is also smaller than any outgoing MTUs.
 
-    // packet from port i is sent to the tx queue i of the destination port
+    // packet from port I is sent to the tx queue i of the destination port
     while(!rte_eth_tx_burst(routing_entry->dst_port, config->port_id, &buf, 1));
     return 0;
 }
@@ -215,8 +215,9 @@ int handle_arp(
     return 0;
 }
 
-void handle_packet(struct device_config* config, struct rte_mbuf* buf) {
-    int ret;
+int handle_packet(struct device_config* config, struct rte_mbuf* buf) {
+    int ret = -1;
+
     struct rte_ether_hdr* eth_hdr;
     struct rte_ipv4_hdr* ipv4_hdr;
     struct rte_arp_hdr* arp_hdr;
@@ -227,16 +228,14 @@ void handle_packet(struct device_config* config, struct rte_mbuf* buf) {
 
     if (rte_pktmbuf_data_len(buf) < sizeof(struct rte_ether_hdr)) {
         printf("ETH: Received way to less data (%d, %d)!\n", rte_pktmbuf_data_len(buf), rte_pktmbuf_pkt_len(buf));
-        rte_pktmbuf_free(buf);
-        return;
+        return -1;
     }
     eth_hdr = rte_pktmbuf_mtod(buf, struct rte_ether_hdr*);
 
     // TODO is this check even needed?
     if (!(rte_is_broadcast_ether_addr(&eth_hdr->d_addr) || rte_is_same_ether_addr(&eth_hdr->d_addr, &config->eth_address))) {
         // eth frame is neither a broadcast, nor addressed to us.
-        rte_pktmbuf_free(buf);
-        return;
+        return -1;
     }
 
     switch (rte_be_to_cpu_16(eth_hdr->ether_type)) {
@@ -246,130 +245,142 @@ void handle_packet(struct device_config* config, struct rte_mbuf* buf) {
 
         ret = validate_ipv4(buf, eth_hdr, ipv4_hdr);
         if (ret != 0) {
-            // TODO is this enough to free stuff?
-            rte_pktmbuf_free(buf);
-            return;
+            break;
         }
 
         ret = handle_ipv4(config, buf, eth_hdr, ipv4_hdr);
-        if (ret != 0) {
-            rte_pktmbuf_free(buf);
-            return;
-        }
         break;
     case RTE_ETHER_TYPE_ARP:
         // accessing the arp_hdr isn't safe before the length check!
         arp_hdr = rte_pktmbuf_mtod_offset(buf, struct rte_arp_hdr*, sizeof(struct rte_ether_hdr));
 
         ret = handle_arp(config, buf, eth_hdr, arp_hdr);
-        if (ret != 0) {
-            rte_pktmbuf_free(buf);
-            return;
-        }
         break;
     default:
-        rte_pktmbuf_free(buf);
         break;
     }
+
+    return ret;
 }
 
 int router_thread(void* arg) {
     struct device_config* config = (struct device_config*) arg;
     struct rte_mbuf* bufs[64];
+    int ret;
 
     while (1) {
         uint32_t rx = recv_from_device(config->port_id, config->device_count, bufs, 64);
         // recv_from_device already handles sleep after zero packets recv.
 
         for (uint32_t i = 0; i < rx; i++) {
-            handle_packet(config, bufs[i]);
+            ret = handle_packet(config, bufs[i]);
+
+            if (ret != 0) {
+                // free unprocessed frames
+                rte_pktmbuf_free(bufs[i]);
+            }
         }
     }
 }
 
-int parse_ip_addr(char* ip_address, uint32_t* dst) {
-    char buf[MAX_IP_LENGTH] = {0};
-    const char dot_delimiter[] = ".";
+/**
+ *
+ * @param input
+ * @param delimiter
+ * @param ptrs
+ * @param ptrs_size
+ * @return
+ */
+int split_str(char* input, char* delimiter, char** ptrs, ssize_t ptrs_size) {
     char* context = NULL;
     char* ptr;
-    uint8_t fst;
-    uint8_t snd;
-    uint8_t trd;
-    uint8_t fou;
 
-    assert(strlen(ip_address) < MAX_IP_LENGTH);
-    memcpy(buf, ip_address, MAX_IP_LENGTH - 1);
+    ptr = strtok_r(input, delimiter, &context);
+    for (int i = 0; i < ptrs_size; i++) { // ptrs_site is the expected input size as well!
+        if (ptr == NULL) {
+            return -1; // format error
+        }
 
-    ptr = strtok_r(buf, dot_delimiter, &context);
-    if (ptr == NULL) {
-        return -1;
+        ptrs[i] = ptr;
+
+        ptr = strtok_r(NULL, delimiter, &context);
     }
-    fst = atoi(ptr);
 
-    ptr = strtok_r(NULL, dot_delimiter, &context);
-    if (ptr == NULL) {
-        return -2;
+    if (ptr != NULL) {
+        return -2; // format error; EOF not reached
     }
-    snd = atoi(ptr);
 
-    ptr = strtok_r(NULL, dot_delimiter, &context);
-    if (ptr == NULL) {
-        return -3;
-    }
-    trd = atoi(ptr);
+    return 0;
+}
 
-    ptr = strtok_r(NULL, dot_delimiter, &context);
-    if (ptr == NULL) {
+int parse_ip_addr(char* ip_address, uint32_t* dst) {
+    char buf[MAX_IP_LENGTH] = {0};
+    char* ptrs[4] = {0};
+    long int nums[4] = {0};
+    int ret;
+
+    if (strlen(ip_address) >= MAX_IP_LENGTH) {
         return -4;
     }
-    fou = atoi(ptr);
 
-    ptr = strtok_r(NULL, dot_delimiter, &context);
-    if (ptr != NULL) {
-        return -5;
+    memcpy(buf, ip_address, strlen(ip_address) + 1);
+
+    ret = split_str(buf, ".", ptrs, 4);
+    if (ret != 0) {
+        return ret;
     }
 
-    *dst = RTE_IPV4(fst, snd, trd, fou);
+    for (int i = 0; i < 4; i++) {
+        nums[i] = strtol(ptrs[i], NULL, 10);
+        if (nums[i] < 0 || nums[i] > 255) { // this implicitly handles conversion errors
+            return -3;
+        }
+    }
+
+    *dst = RTE_IPV4(nums[0], nums[1], nums[2], nums[3]);
     return 0;
 }
 
 int parse_ip_cidr(char* ip_address_cidr, uint32_t* dst, uint8_t* prefix) {
     char buf[MAX_IP_CIDR_LENGTH] = {0};
-    const char slash_delimiter[] = "/";
-    char* context = NULL;
-    char* ip_address;
-    char* prefix_num;
-    char* ptr;
+    char* ptrs[2] = {0};
+    long int prefix_tmp;
     int ret;
 
-    assert(strlen(ip_address_cidr) < MAX_IP_CIDR_LENGTH);
-    memcpy(buf, ip_address_cidr, MAX_IP_CIDR_LENGTH - 1);
-
-    ip_address = strtok_r(buf, slash_delimiter, &context);
-    if (ip_address == NULL) {
+    if (strlen(ip_address_cidr) >= MAX_IP_CIDR_LENGTH) {
         return -6;
     }
+    memcpy(buf, ip_address_cidr, strlen(ip_address_cidr) + 1);
 
-    prefix_num = strtok_r(NULL, slash_delimiter, &context);
-    if (prefix_num == NULL) {
-        return -7;
-    }
-
-    ptr = strtok_r(NULL, slash_delimiter, &context);
-    if (ptr != NULL) {
-        return -8;
-    }
-
-    ret = parse_ip_addr(ip_address, dst);
+    ret = split_str(buf, "/", ptrs, 2);
     if (ret != 0) {
         return ret;
     }
 
-    *prefix = atoi(prefix_num);
+    ret = parse_ip_addr(ptrs[0], dst);
+    if (ret != 0) {
+        return ret;
+    }
+
+    prefix_tmp = strtol(ptrs[1], NULL, 10);
+    if (prefix_tmp < 0 || prefix_tmp > 32) {
+        return -5;
+    }
+
+    *prefix = (uint8_t) prefix_tmp;
     return 0;
 }
 
-void parse_route(char *route) {
+int parse_port(char* input, uint8_t* port) {
+    long int num;
+
+    num = strtol(input, NULL, 10);
+    if (num < 0 || num > UINT8_MAX) {
+        return 1;
+    }
+
+    *port = num;
+    return 0;
 }
 
 /**
@@ -426,166 +437,121 @@ void free_routes() {
     }
 }
 
-int parse_args(int argc, char** argv) {
-    const char comma_delimiter[] = ",";
-    char* context = NULL;
-    int opt;
+int parse_p_arg(struct port** list_head) {
+    static struct port* port;
+    char* ptrs[2] = {0};
     int ret;
-    size_t len;
-    char* ptr;
 
-    struct port* port = NULL;
-    struct route* route = NULL;
+    ret = split_str(optarg, ",", ptrs, 2);
+    if (ret != 0) {
+        printf("ERR: Invalid format for p option: %d\n", ret);
+        return -1;
+    }
+
+    port = calloc(1, sizeof(struct port));
+    if (port == NULL) {
+        printf("ERR: Failed port memory allocation\n");
+        return -1;
+    }
+
+    ret = parse_port(ptrs[0], &port->iface_port);
+    if (ret != 0) {
+        printf("ERR: Invalid port format for p option: %d\n", ret);
+        free(port);
+        return -1;
+    }
+
+    ret = parse_ip_addr(ptrs[1], &port->ip_address);
+    if (ret != 0) {
+        printf("ERR: Invalid ip address format for p option: %d\n", ret);
+        free(port);
+        return -1;
+    }
+
+
+    if (*list_head == NULL) {
+        *list_head = port;
+    } else {
+        struct port* entry = *list_head;
+        while (entry->next != NULL) {
+            entry = entry->next;
+        }
+        entry->next = port;
+    }
+    return 0;
+}
+
+int parse_r_arg(struct route** list_head) {
+    static struct route* route;
+    char* ptrs[3] = {0};
+    int ret;
+
+    ret = split_str(optarg, ",", ptrs, 3);
+    if (ret != 0) {
+        printf("ERR: Invalid format for r option: %d\n", ret);
+        return -1;
+    }
+
+    route = calloc(1, sizeof(struct route));
+    if (route == NULL) {
+        printf("ERR: Failed route memory allocation\n");
+        return -1;
+    }
+
+    ret = parse_ip_cidr(ptrs[0], &route->route_ip_addr, &route->prefix);
+    if (ret != 0) {
+        printf("ERR: Invalid ip cidr format: %d\n", ret);
+        free(route);
+        return -1;
+    }
+
+    ret = rte_ether_unformat_addr(ptrs[1], &route->next_hop.mac_address);
+    if (ret != 0) {
+        printf("ERR: Invalid mac address format: %s (%d)\n", rte_strerror(rte_errno), ret);
+        free(route);
+        return -1;
+    }
+
+    ret = parse_port(ptrs[2], &route->next_hop.port);
+    if (ret != 0) {
+        printf("ERR: Invalid port format: %d\n", ret);
+        free(route);
+        return -1;
+    }
+
+    if (*list_head == NULL) {
+        *list_head = route;
+    } else {
+        struct route* entry = *list_head;
+        while (entry->next != NULL) {
+            entry = entry->next;
+        }
+        entry->next = route;
+    }
+    return 0;
+}
+
+int parse_args(int argc, char** argv) {
+    int opt;
+    int ret = 0;
 
     while ((opt = getopt(argc, argv, "p:r:")) != EOF) {
-        context = NULL;
-
         switch (opt) {
         case 'p':
-            port = calloc(1, sizeof(struct port));
-
-            // parse the interface id
-            ptr = strtok_r(optarg, comma_delimiter, &context);
-            if (ptr == NULL) {
-                printf("ERR: Invalid format for 'p' option(0)!\n");
-                usage();
-                free(port);
-                return 1;
-            }
-            port->iface_port = atoi(ptr); // TODO replace atoi?
-
-
-            // parse the ip address
-            ptr = strtok_r(NULL, comma_delimiter, &context);
-            if (ptr == NULL) {
-                printf("ERR: Invalid format for 'p' option(1)!\n");
-                usage();
-                free(port);
-                return 1;
-            }
-
-            len = strlen(ptr);
-            assert(len < MAX_IP_LENGTH && "Invalid ip format!");
-            if (len >= MAX_IP_LENGTH) {
-                printf("ERR: Invalid format for 'p' option(2)!\n");
-                usage();
-                free(port);
-                return 1;
-            }
-
-            ret = parse_ip_addr(ptr, &port->ip_address);
-            if (ret != 0) {
-                printf("ERR: Invalid format for 'p' option(3)!\n");
-                usage();
-                free(port);
-                return 1;
-            }
-
-            ptr = strtok_r(NULL, comma_delimiter, &context);
-            if (ptr != NULL) {
-                printf("ERR: Invalid format for 'p' option(4)!\n");
-                usage();
-                free(port);
-                return 1;
-            }
-
-
-            // insert into the linked list!
-            if (port_options == NULL) {
-                port_options = port;
-            } else {
-                struct port* entry = port_options;
-                while (entry->next != NULL) {
-                    entry = entry->next;
-                }
-                entry->next = port;
-            }
-            port = NULL;
+            ret = parse_p_arg(&port_options);
             break;
         case 'r':
-            route = calloc(1, sizeof(struct route));
-
-            ptr = strtok_r(optarg, comma_delimiter, &context);
-            if (ptr == NULL) {
-                printf("ERR: Invalid format for 'r' option(0)!\n");
-                usage();
-                free(route);
-                return 1;
-            }
-
-            len = strlen(ptr);
-            if (len >= MAX_IP_CIDR_LENGTH) {
-                printf("ERR: Invalid format for 'r' option(1)!\n");
-                usage();
-                free(route);
-                return 1;
-            }
-
-            ret = parse_ip_cidr(ptr, &route->route_ip_addr, &route->prefix);
-            if (ret != 0) {
-                printf("ERR: Invalid format for 'r' option(2)!\n");
-                usage();
-                free(route);
-                return 1;
-            }
-
-            ptr = strtok_r(NULL, comma_delimiter, &context);
-            if (ptr == NULL) {
-                printf("ERR: Invalid format for 'r' option(3)!\n");
-                usage();
-                free(route);
-                return 1;
-            }
-
-            len = strlen(ptr);
-            if (len != (RTE_ETHER_ADDR_FMT_SIZE - 1)) {
-                printf("ERR: Invalid format for 'r' option(4)!\n");
-                usage();
-                free(route);
-                return 1;
-            }
-
-            ret = rte_ether_unformat_addr(ptr, &route->next_hop.mac_address);
-            if (ret != 0) {
-                printf("ERR: Invalid format for 'r' option(5): %s!\n", rte_strerror(rte_errno));
-                usage();
-                free(route);
-                return 1;
-            }
-
-            ptr = strtok_r(NULL, comma_delimiter, &context);
-            if (ptr == NULL) {
-                printf("ERR: Invalid format for 'r' option(6)!\n");
-                usage();
-                free(route);
-                return 1;
-            }
-            route->next_hop.port = atoi(ptr);
-
-            ptr = strtok_r(NULL, comma_delimiter, &context);
-            if (ptr != NULL) {
-                printf("ERR: Invalid format for 'r' option(7)!\n");
-                usage();
-                free(route);
-                return 1;
-            }
-
-            if (route_options == NULL) {
-                route_options = route;
-            } else {
-                struct route* entry = route_options;
-                while (entry->next != NULL) {
-                    entry = entry->next;
-                }
-                entry->next = route;
-            }
-            route = NULL;
+            ret = parse_r_arg(&route_options);
             break;
         default:
             printf("ERR: Unrecognized option %c %s\n", opt, optarg);
-            usage();
-            return 1;
+            ret = -1;
         }
+    }
+
+    if (ret != 0) {
+        usage();
+        return 1;
     }
 
     if (port_options != NULL) {
@@ -624,6 +590,10 @@ int parse_args(int argc, char** argv) {
 
 void start_thread(struct port* port) {
     struct device_config* config = calloc(1, sizeof(struct device_config));
+    if (config == NULL) {
+        printf("Failed to initialize device_config\n");
+        exit(1);
+    }
     config->port_id = port->iface_port;
     config->ip_address = port->ip_address;
     config->device_count = port_count();

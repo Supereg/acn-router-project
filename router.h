@@ -56,8 +56,6 @@ uint8_t port_count();
 void free_ports();
 void free_routes();
 
-void parse_route(char *route);
-
 void run_loop();
 
 int router_thread(void* arg);
