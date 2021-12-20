@@ -20,7 +20,7 @@ struct routing_table_entry {
 
 void print_routing_table_entry(struct routing_table_entry* info);
 
-struct routing_table_entry* get_next_hop(uint32_t ip);
+struct routing_table_entry* get_next_hop(rte_be32_t ip);
 
 #endif
 
