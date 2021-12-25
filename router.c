@@ -116,7 +116,7 @@ int handle_ipv4(
     }
 
     // note get_next_hop expects network byte order
-    routing_entry = get_next_hop(ipv4_hdr->dst_addr);
+    routing_entry = get_next_hop(rte_be_to_cpu_32(ipv4_hdr->dst_addr));
     if (routing_entry == NULL) {
         printf("IPv4 couldn't find a routing entry for dst: %d.%d.%d.%d\n",
                RTE_IPV4_UNFORMAT(rte_be_to_cpu_32(ipv4_hdr->dst_addr)));

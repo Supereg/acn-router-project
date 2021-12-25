@@ -10,7 +10,18 @@ extern "C" {
 #include <cstdlib>
 #include <unistd.h>
 
-struct rte_ether_addr port_id_to_mac[4];
+struct rte_ether_addr port_id_to_mac[10];
+
+void init() {
+    // create dummy mac addresses
+    for (int i = 0; i < 10; ++i) {
+        for (int a = 0; a < 6; ++a) {
+            port_id_to_mac[i].addr_bytes[a] = (uint8_t) i*10;
+        }
+    }
+
+    destruct_routing_table();
+}
 
 void check_address(uint8_t a, uint8_t b, uint8_t c, uint8_t d, int next_hop) {
 	int ip = RTE_IPV4(a,b,c,d);
@@ -22,13 +33,7 @@ void check_address(uint8_t a, uint8_t b, uint8_t c, uint8_t d, int next_hop) {
 }
 
 TEST(VERY_SIMPLE_TEST, SIMPLE_ADDRESSES) {
-	// create dummy mac addresses
-	for (int i = 0; i < 4; ++i) {
-		for (int a = 0; a < 6; ++a) {
-			port_id_to_mac[i].addr_bytes[a] = (uint8_t) i*10;
-		}
-	}
-
+    init();
 
 	// init routing table stuff
 	printf("Try to add routes.\n");
@@ -47,6 +52,44 @@ TEST(VERY_SIMPLE_TEST, SIMPLE_ADDRESSES) {
 		check_address(10, 0, 10, i%256, 0);
 	}
 	EXPECT_EQ(nullptr, get_next_hop(RTE_IPV4(10,0,11,0)));
+}
+
+TEST(VERY_SIMPLE_TEST, EXTENSIVE_ADRESSES) {
+    init();
+
+    printf("Adding routes\n");
+    add_route(RTE_IPV4(10,0,10,0), 24, &port_id_to_mac[0], 0);
+    add_route(RTE_IPV4(10,0,40,10), 32, &port_id_to_mac[1], 1);
+    add_route(RTE_IPV4(10,0,11,0), 24, &port_id_to_mac[3], 3);
+    add_route(RTE_IPV4(10,0,10,128), 25, &port_id_to_mac[4], 4);
+    add_route(RTE_IPV4(10,0,10,132), 30, &port_id_to_mac[5], 5);
+
+    build_routing_table();
+
+    printf("CHECKING /32\n");
+    EXPECT_EQ(nullptr, get_next_hop(RTE_IPV4(10, 0, 40, 9)));
+    check_address(10, 0, 40, 10, 1);
+    EXPECT_EQ(nullptr, get_next_hop(RTE_IPV4(10, 0, 40, 11)));
+
+    printf("CHECKING /24\n");
+    EXPECT_EQ(nullptr, get_next_hop(RTE_IPV4(10,0,9,255)));
+    for(int i = 0; i < 256; ++i) {
+        uint8_t next_hop = 0;
+
+        if (i >= 128) {
+            next_hop = 4;
+            if (i >= 132 && i <= 135) {
+                next_hop = 5;
+            }
+        }
+
+        check_address(10, 0, 10, i%256, next_hop);
+    }
+
+    for (int i = 0; i < 256; i++) {
+        check_address(10, 0, 11, i%256, 3);
+    }
+    EXPECT_EQ(nullptr, get_next_hop(RTE_IPV4(10,0,12,0)));
 }
 
 int main(int argc, char* argv[]) {

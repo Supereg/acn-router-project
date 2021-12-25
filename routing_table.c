@@ -5,20 +5,21 @@
 #include <rte_config.h>
 #include <rte_ip.h>
 
-static struct routing_table_entry hop_info1 = {
-    .dst_mac = {.addr_bytes = {0x52, 0x54, 0x00, 0xff, 0x01, 0x00}},
-    .dst_port = 0
-};
-static struct routing_table_entry hop_info2 = {
-    .dst_mac = {.addr_bytes = {0x52, 0x54, 0x00, 0xff, 0x02, 0x00}},
-    .dst_port = 1
-};
+#define TBL24_SIZE 16777216 // 2^24 entries
+#define TBL_LONG_SIZE (255*256)
 
-static uint16_t TBL24[16777216] = {0}; // 2^24 entries
-static uint8_t TBLlong[255*256] = {0};
+/**
+ * We encode non existent TBL24 entries with all ones except the most significant bit, which is set to zero.
+ * This is basically a entry, which holds a next_hop_id (most significant bit is 1) but with all ones.
+ * As we have 1 byte port ids, this is a non existent entry.
+ *
+ * For simplicity reasons, TBLlong uses the same value to indicate non-existent value.
+ */
+#define NON_EXISTENT_ENTRY 0x7FFF // 0b0111.1111.1111.1111
 
-struct routing_table_entry* hops;
-int hops_size = -1;
+#define IS_TBL_LONG_PTR(tbl24_entry) ((tbl24_entry & 0x8000) != 0)
+#define MAKE_TBL_LONG_PTR(tbl24_entry) (tbl24_entry | 0x8000)
+#define UNWRAP_TBL_LONG_PTR(tbl24_entry) (tbl24_entry & NON_EXISTENT_ENTRY)
 
 struct added_route {
     uint32_t ip_addr;
@@ -29,11 +30,51 @@ struct added_route {
     struct added_route* next;
 };
 
-bool building = true;
-struct added_route* list_head;
-int list_size = 0;
+static uint16_t TBL24[TBL24_SIZE] = {0};
+/**
+ * We use uint16_t instead of uint8_t as we somehow need to encode non existent entries.
+ * Any value bigger than UINT8_MAX is used to indicate a non-existent value.
+ * Specifically, for simplicity reasons we use `NON_EXISTENT_ENTRY` (like in TBL24).
+ */
+static uint16_t TBLlong[TBL_LONG_SIZE] = {0};
+static uint16_t next_tbl_long_index = 0;
 
-void mergesort(struct added_route array[], int low, int high);
+/**
+ * Lookup table for hops. We construct this dynamically based on the biggest port id we encounter.
+ */
+struct routing_table_entry* hops = NULL;
+int max_hop_id = -1;
+
+bool building = true;
+struct added_route* list_head = NULL;
+
+/**
+ * You may call this to reset application state back to initialization.
+ */
+void destruct_routing_table() {
+    struct added_route* entry;
+    struct added_route* tmp;
+
+    if (hops != NULL) {
+        free(hops);
+        hops = NULL;
+    }
+    max_hop_id = -1;
+
+    entry = list_head;
+    while (entry != NULL) {
+        tmp = entry;
+        entry = entry->next;
+        free(tmp);
+    }
+    list_head = NULL;
+
+    memset(TBL24, 0, TBL24_SIZE * sizeof(uint16_t));
+    memset(TBLlong, 0, TBL_LONG_SIZE * sizeof(uint16_t));
+    next_tbl_long_index = 0;
+
+    building = true;
+}
 
 uint32_t ones(uint8_t count) {
     uint32_t result = 0;
@@ -48,73 +89,89 @@ uint32_t ones(uint8_t count) {
 
 // do nothing :)
 void build_routing_table() {
-    struct added_route route_array[list_size];
-    int next_free_element = 0;
     struct added_route* entry;
-    struct added_route* tmp;
-    uint8_t biggest_port = 0;
+
+    // step 0 is to init the tables
+    for (int i = 0; i < TBL24_SIZE; i++) {
+        TBL24[i] = NON_EXISTENT_ENTRY;
+    }
+
+    for (int i = 0; i < TBL_LONG_SIZE; ++i) {
+        TBLlong[i] = NON_EXISTENT_ENTRY;
+    }
 
     building = false;
-    memset(route_array, 0, list_size * sizeof(struct added_route));
+
+    hops = calloc(max_hop_id + 1, sizeof(struct rte_ether_addr));
+    if (hops == NULL) {
+        printf("ERR: Failed to allocate `hops` memory!\n");
+        exit(1);
+    }
 
     entry = list_head;
     while (entry != NULL) {
-        route_array[next_free_element] = *entry;
-        route_array[next_free_element].next = NULL;
-        next_free_element++;
-
-        if (entry->port > biggest_port) {
-            biggest_port = entry->port;
-        }
-
-        tmp = entry;
-        entry = entry->next;
-        free(tmp);
-    }
-    // TODO assert list_size == next_free_element;
-
-    mergesort(route_array, 0, list_size);
-
-    hops_size = biggest_port;
-    hops = calloc(hops_size, sizeof(struct rte_ether_addr));
-
-    for (int i = 0; i < list_size; i++) {
-        entry = &route_array[i];
-
+        // write the hop num
         hops[entry->port].dst_port = entry->port;
         hops[entry->port].dst_mac = entry->mac_addr;
 
-        uint8_t prefix_min_24 = entry->prefix > 24 ? 24 : entry->prefix;
-        uint8_t perms = 24 - prefix_min_24;
+        uint32_t netmask = ~ones(32 - entry->prefix);
+        uint32_t tbl_24_addr = (entry->ip_addr & netmask) >> 8;
+        uint8_t tbl_long_addr = 0xFF & (entry->ip_addr & netmask);
 
-        uint32_t neg_netmask_24 = ones(32  - prefix_min_24);
+        printf("Building route %d.%d.%d.%d/%d with port id %d\n", RTE_IPV4_UNFORMAT(entry->ip_addr), entry->prefix, entry->port);
 
-        uint32_t tbl_addr = (entry->ip_addr & ~neg_netmask_24) >> 8; // the first 24 bits
-        uint8_t long_addr = entry->ip_addr & neg_netmask_24; // the last 8 bits
+        if (entry->prefix > 24) {
+            uint16_t tbl_long_ptr;
 
-        ssize_t permutations = (ssize_t) pow(2, (24 - prefix_min_24));
+            uint8_t lowest = tbl_long_addr + 0;
+            uint8_t highest = tbl_long_addr + ones(32 - entry->prefix);
 
-        uint16_t next_hop_entry;
-        if (long_addr == 0) {
-            next_hop_entry = entry->port;
+            // remember: due to our sorting above, we have the guarantee, that we are always just overwriting less specific routes
+
+            uint16_t curren_tbl_entry = TBL24[tbl_24_addr];
+            if (IS_TBL_LONG_PTR(curren_tbl_entry)) {
+                tbl_long_ptr = UNWRAP_TBL_LONG_PTR(curren_tbl_entry);
+
+                // we have an existent ptr to TBLlong, just write our (more specific) route into its according entries
+                for (uint8_t j = lowest; j <= highest; j++) {
+                    TBLlong[tbl_long_ptr + j] = entry->port;
+                }
+            } else { // we either have a non-existent entry, or a next hop id
+                tbl_long_ptr = next_tbl_long_index;
+                next_tbl_long_index += 256; // we always reserve the next 256 entries
+
+                for (uint8_t j = 0; true; j++) {
+                    if (j >= lowest && j <= highest) {
+                        TBLlong[tbl_long_ptr + j] = entry->port;
+                    } else {
+                        // this writes either `NON_EXISTENT_ENTRY` or the current port id from TBL24
+                        TBLlong[tbl_long_ptr + j] = curren_tbl_entry;
+                    }
+
+                    if (j == UINT8_MAX) {
+                        break;
+                    }
+                }
+            }
+
+            TBL24[tbl_24_addr] = MAKE_TBL_LONG_PTR(tbl_long_ptr);
         } else {
-            next_hop_entry = long_addr | 0x80; // TODO not exactly sure what we write into here?
+            // we know entry.prefix is <= 24
+            ssize_t permutations = (ssize_t) pow(2, (24 - entry->prefix));
+            for (ssize_t j = 0; j < permutations; j++) {
+                TBL24[tbl_24_addr + j] = entry->port;
+            }
         }
 
-        printf("Route %d.%d.%d.%d/%d on port %d, TBL %d.%d.%d.%d LONG: %d\n",
-               RTE_IPV4_UNFORMAT(entry->ip_addr), entry->prefix, entry->port, RTE_IPV4_UNFORMAT(tbl_addr), long_addr);
-
-        for (ssize_t j = 0; j < permutations; j++) {
-            TBL24[tbl_addr] = next_hop_entry;
-            tbl_addr++;
-        }
-        // tbl_addr must not be used after this point!
-        // TODO depending on the prefix size, fill TBLIST!2
+        entry = entry->next;
     }
+
+    printf("Finished building routing table!\n");
 }
 
 void add_route(uint32_t ip_addr, uint8_t prefix, struct rte_ether_addr* mac_addr, uint8_t port) {
     struct added_route* added_route;
+    struct added_route* entry;
 
     if (!building) {
         printf("Tried adding a new route after finished building routing table!\n");
@@ -132,63 +189,64 @@ void add_route(uint32_t ip_addr, uint8_t prefix, struct rte_ether_addr* mac_addr
     added_route->mac_addr = *mac_addr;
     added_route->port = port;
 
-    // prepend for efficient insert!
-    added_route->next = list_head;
-    list_head = added_route;
-    list_size++;
+    if (added_route->port > max_hop_id) {
+        max_hop_id = added_route->port;
+    }
+
+    // sorted insert into linked list
+    if (list_head == NULL) {
+        list_head = added_route;
+    } else {
+        struct added_route** entry_ptr;
+
+        entry_ptr = &list_head;
+        entry = list_head;
+        for(;;) {
+            if (added_route->prefix < entry->prefix) {
+                added_route->next = entry;
+                *entry_ptr = added_route;
+                break;
+            }
+
+            if (entry->next == NULL) {
+                entry->next = added_route;
+                break;
+            }
+
+            entry_ptr = &entry->next;
+            entry = entry->next;
+        }
+    }
 }
 
-struct routing_table_entry* get_next_hop(rte_be32_t ip) {
-    uint32_t ip_address;
+struct routing_table_entry* get_next_hop(uint32_t ip) {
     uint32_t address_24;
+    uint8_t address_8;
     uint16_t tbl24_entry;
-    struct routing_table_entry* routing_entry;
 
-    ip_address = rte_be_to_cpu_32(ip);
-    address_24 = (ip_address & ~ones(8)) >> 8;
+    address_24 = ip >> 8;
+    address_8 = ip & 0xFF;
 
-    // TODO assert out of bounds access?
+    assert(address_24 < TBL24_SIZE && "TBL24 index out of bounds!");
     tbl24_entry = TBL24[address_24];
 
-    if ((tbl24_entry & 0x80) != 0) {
-        printf("TBLlong entries aren't supported yet!\n");
+    if (IS_TBL_LONG_PTR(tbl24_entry)) {
+        uint16_t tbl_long_index = UNWRAP_TBL_LONG_PTR(tbl24_entry);
+        uint16_t tbl_long_value = TBLlong[tbl_long_index + address_8];
+
+        if (tbl_long_value > UINT8_MAX) {
+            // non-existent route entry. also see `NON_EXISTENT_ENTRY`.
+            return NULL;
+        }
+
+        return &hops[tbl_long_value];
+    }
+
+
+    if (tbl24_entry > UINT8_MAX) {
+        // non-existent route entry. also see `NON_EXISTENT_ENTRY`.
         return NULL;
     }
 
-    routing_entry = &hops[tbl24_entry];
-    return routing_entry;
-}
-
-void merge(struct added_route array[], int low, int middle, int high) {
-    struct added_route sorted[high - low + 1];
-
-    int groupA = low;
-    int groupB = middle + 1;
-
-    for (int i = 0; i < (high - low + 1); i++) {
-        if (groupA > middle) { // a is empty
-            sorted[i] = array[groupB++];
-        } else if (groupB > high) { // b is empty
-            sorted[i] = array[groupA++];
-        } else if (array[groupA].prefix < array[groupB].prefix) {
-            sorted[i] = array[groupA++];
-        } else {
-            sorted[i] = array[groupB++];
-        }
-    }
-
-    for (int i = 0; i < (high - low + 1); i++) {
-        array[low + i] = sorted[i];
-    }
-}
-
-void mergesort(struct added_route array[], int low, int high) {
-    if (low >= high) {
-        return;
-    }
-
-    int mid = (low + high) / 2;
-    mergesort(array, low, mid);
-    mergesort(array, mid + 1, high);
-    merge(array, low, mid, high);
+    return &hops[tbl24_entry];
 }
