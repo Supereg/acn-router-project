@@ -110,7 +110,7 @@ int handle_ipv4(
 ) {
     struct routing_table_entry* routing_entry;
 
-    if (ipv4_hdr->time_to_live == 1) { // will be decreased to 0
+    if (ipv4_hdr->time_to_live <= 1) { // will be decreased to 0
         printf("IPv4 dropping packet due to ttl being 0\n");
         return -1;
     }
@@ -123,8 +123,8 @@ int handle_ipv4(
         return -1;
     }
 
-    // copy our eth address into the s_addr field!
-    eth_hdr->s_addr = config->eth_address;
+    // copy eth address of the dst_port into the s_addr field!
+    rte_eth_macaddr_get(routing_entry->dst_port, &eth_hdr->s_addr);
     // set the d_addr field to the dst_mac of the routing entry!
     eth_hdr->d_addr = routing_entry->dst_mac;
 
