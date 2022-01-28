@@ -627,6 +627,8 @@ void run_loop() {
         route = route->next;
     }
 
+    build_routing_table();
+
     // starting threads for each device ...
     port = port_options;
     while (port != NULL) {

@@ -224,6 +224,8 @@ struct routing_table_entry* get_next_hop(uint32_t ip) {
     uint8_t address_8;
     uint16_t tbl24_entry;
 
+    assert(!building && "Tried to retrieve next hop, though `build_routing_table` wasn't yet called!");
+
     address_24 = ip >> 8;
     address_8 = ip & 0xFF;
 
